@@ -27,7 +27,7 @@ ENV WATSONX_IAM_APIKEY="" \
 # Define environment variable for Python to avoid buffering
 ENV PYTHONUNBUFFERED=1
 
-COPY watsonxai-endpoint.py /app/watsonxai-endpoint.py
+COPY watsonxai-embedding-endpoint.py /app/watsonxai-embedding-endpoint.py
 
 # Run the FastAPI app with Uvicorn when the container launches
 CMD ["uvicorn", "watsonxai-embedding-endpoint:app", "--host", "0.0.0.0", "--port", "8000"]
