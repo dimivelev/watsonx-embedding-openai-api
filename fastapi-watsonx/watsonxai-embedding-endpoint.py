@@ -773,12 +773,9 @@ async def watsonx_embeddings(request: Request):
 
     # Get the IAM token
     iam_token = get_watsonx_token()
-<<<<<<< HEAD
-    model_id = "intfloat/multilingual-e5-large"  # Default model ID if not provided
-=======
-	model_id = "intfloat/multilingual-e5-large"
->>>>>>> a39370f125aa28163999a28439e04e58750ae6d9
-    # Prepare Watsonx.ai embeddings payload
+    
+    model_id = "intfloat/multilingual-e5-large"
+    
     watsonx_payload = {
         "inputs": inputs,
         "model_id": model_id,
