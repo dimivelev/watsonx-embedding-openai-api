@@ -77,6 +77,7 @@ if on_prem == "1":
     WATSONX_URL = f"{cpd_url}/ml/v1/text/generation?version={api_version}"
     WATSONX_URL_CHAT = f"{cpd_url}/ml/v1/text/chat?version={api_version}"
     WATSONX_URL_EMBEDDINGS = f"{cpd_url}/ml/v1/text/embeddings?version={api_version}"
+    WATSONX_URL_RERANK = f"{cpd_url}/ml/v1/text/rerank?version={api_version}"
     WATSONX_CUSTOM_MODELS_URL = f"{cpd_url}/ml/v4/custom_foundation_models?version=2024-05-01"      
 else:
     WATSONX_MODELS_URL = f"{WATSONX_URLS.get(region)}/ml/v1/foundation_model_specs"
@@ -84,6 +85,7 @@ else:
     WATSONX_URL = f"{WATSONX_URLS.get(region)}/ml/v1/text/generation?version={api_version}"
     WATSONX_URL_CHAT = f"{WATSONX_URLS.get(region)}/ml/v1/text/chat?version={api_version}"
     WATSONX_URL_EMBEDDINGS = f"{WATSONX_URLS.get(region)}/ml/v1/text/embeddings?version={api_version}"
+    WATSONX_URL_RERANK = f"{WATSONX_URLS.get(region)}/ml/v1/text/rerank?version={api_version}"
 
 # Load IBM API key, Watsonx URL, and Project ID from environment variables
 IBM_API_KEY = os.getenv("WATSONX_IAM_APIKEY")
@@ -800,33 +802,127 @@ async def watsonx_embeddings(request: Request):
         watsonx_data = response.json()
         logger.debug(f"Received embeddings response from Watsonx.ai: {json.dumps(watsonx_data, indent=4)}")
 
+        # Convert Watsonx response to OpenAI format
+        data = []
+        for i, result in enumerate(watsonx_data.get("results", [])):
+            data.append({
+                "object": "embedding",
+                "embedding": result.get("embedding"),
+                "index": i
+            })
+
+        openai_response = {
+            "object": "list",
+            "data": data,
+            "model": model_id,
+            "usage": {
+                "prompt_tokens": watsonx_data.get("input_token_count", 0),
+                "total_tokens": watsonx_data.get("input_token_count", 0)
+            }
+        }
+        return openai_response
+
+    except requests.exceptions.HTTPError as err:
+        logger.error(f"HTTPError: {err}, Response: {response.text}")
+        raise HTTPException(status_code=response.status_code, detail=f"Error from Watsonx.ai: {response.text}")
+
+@app.post("/v1/rerank")
+async def watsonx_rerank(request: Request):
+    logger.info("Received a Watsonx rerank request.")
+
+    # Parse the incoming request as JSON
+    try:
+        request_data = await request.json()
+    except Exception as e:
+        logger.error(f"Error parsing request: {e}")
+        raise HTTPException(status_code=400, detail="Invalid JSON request body")
+
+    # Extract parameters (Standard OpenAI-compatible/Cohere/Jina format)
+    query = request_data.get("query")
+    documents = request_data.get("documents")
+    model_id = request_data.get("model", "cross-encoder/ms-marco-miniclm-l-6-v2")
+    top_n = request_data.get("top_n")
+    
+    if not query:
+        raise HTTPException(status_code=400, detail="Missing 'query' field.")
+    if not documents or not isinstance(documents, list):
+        raise HTTPException(status_code=400, detail="Missing or invalid 'documents' field. Expected a list.")
+
+    # Normalize documents to format expected by Watsonx
+    # Watsonx typically expects: [{"text": "doc1"}, {"text": "doc2"}]
+    watsonx_documents = []
+    for doc in documents:
+        if isinstance(doc, str):
+            watsonx_documents.append({"text": doc})
+        elif isinstance(doc, dict) and "text" in doc:
+            watsonx_documents.append(doc)
+        else:
+            # Fallback for dicts without 'text' key (e.g. if key is 'content')
+            # Using str(doc) to ensure it's textual
+            watsonx_documents.append({"text": str(doc)})
+
+    # Get the IAM token
+    iam_token = get_watsonx_token()
+
+    # Prepare Watsonx.ai request payload
+    watsonx_payload = {
+        "model_id": model_id,
+        "project_id": PROJECT_ID,
+        "query": query,
+        "documents": watsonx_documents
+    }
+    
+    # Add optional parameters if present
+    parameters = {}
+    if top_n is not None:
+        parameters["top_n"] = top_n
+        
+    if parameters:
+        watsonx_payload["parameters"] = parameters
+
+    headers = {
+        "Authorization": f"Bearer {iam_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+
+    try:
+        # Send the request to Watsonx.ai
+        response = requests.post(
+            WATSONX_URL_RERANK,
+            json=watsonx_payload,
+            headers=headers,
+            verify=False
+        )
+        response.raise_for_status()
+        watsonx_data = response.json()
+        logger.debug(f"Received rerank response from Watsonx.ai: {json.dumps(watsonx_data, indent=4)}")
+
+        # Convert Watsonx response to OpenAI-compatible (Cohere-style) format
+        # Watsonx structure: {"results": [{"index": 0, "score": 0.9, "document": {...}}, ...]}
+        # Target structure: {"model": "...", "results": [{"index": 0, "relevance_score": 0.9}, ...]}
+        
+        results = []
+        for result in watsonx_data.get("results", []):
+            results.append({
+                "index": result.get("index"),
+                "relevance_score": result.get("score")
+            })
+
+        # Sort results by score just in case Watsonx didn't, though they usually do
+        results.sort(key=lambda x: x["relevance_score"], reverse=True)
+
+        openai_response = {
+            "model": model_id,
+            "results": results,
+            "id": f"rerank-{str(uuid.uuid4())[:12]}"
+        }
+        
+        return openai_response
+
     except requests.exceptions.HTTPError as err:
         logger.error(f"HTTPError: {err}, Response: {response.text}")
         raise HTTPException(status_code=response.status_code, detail=f"Error from Watsonx.ai: {response.text}")
     except requests.exceptions.RequestException as err:
         logger.error(f"RequestException: {err}")
         raise HTTPException(status_code=500, detail=f"Error calling Watsonx.ai: {err}")
-
-    # Map Watsonx response to OpenAI format
-    embeddings_data = []
-    total_tokens = watsonx_data.get("input_token_count", 0)
-
-    for idx, result in enumerate(watsonx_data.get("results", [])):
-        embeddings_data.append({
-            "object": "embedding",
-            "embedding": result["embedding"],
-            "index": idx
-        })
-
-    openai_response = {
-        "object": "list",
-        "data": embeddings_data,
-        "model": model_id,
-        "usage": {
-            "prompt_tokens": total_tokens,
-            "total_tokens": total_tokens
-        }
-    }
-
-    logger.debug(f"Returning OpenAI-compatible embeddings response: {json.dumps(openai_response, indent=4)}")
-    return openai_response
